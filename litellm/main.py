@@ -2513,6 +2513,9 @@ def _complete_bedrock_mantle(
     )
 
 
+_A2A_AGENT_TIMEOUT_SECONDS: Final = 60.0
+
+
 def _complete_a2a(ctx: CompletionDispatchContext) -> _CompletionDispatchResult:
     acompletion: Final = ctx.acompletion
     api_base = ctx.api_base
@@ -2554,6 +2557,24 @@ def _complete_a2a(ctx: CompletionDispatchContext) -> _CompletionDispatchResult:
         )
 
     headers = headers or litellm.headers
+
+    from litellm.llms.a2a.chat.agent_provider import acompletion_through_agent_provider, registered_agent_provider
+
+    agent_provider: Final = registered_agent_provider(model) if acompletion else None
+    if agent_provider is not None:
+        return acompletion_through_agent_provider(
+            provider=agent_provider[0],
+            agent_params=agent_provider[1],
+            model=model,
+            messages=messages,  # pyright: ignore[reportUnknownArgumentType]  # ctx.messages is an untyped list
+            api_base=api_base,
+            api_key=api_key,
+            headers=headers or {},  # pyright: ignore[reportUnknownArgumentType]  # ctx.headers is an untyped dict
+            stream=stream is True,
+            timeout=float(timeout) if isinstance(timeout, (int, float)) else _A2A_AGENT_TIMEOUT_SECONDS,
+            model_response=model_response,
+            logging_obj=logging,
+        )
 
     return base_llm_http_handler.completion(
         model=model,
