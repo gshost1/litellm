@@ -43,6 +43,10 @@ pub enum Error {
         deployment_id: String,
         error: Box<Error>,
     },
+    /// The failure of a served stream that the provider failed before any content and that no
+    /// other attempt answered for, with what the router did for that stream.
+    #[error("{error}")]
+    StreamFailed { routing: Routing, error: Box<Error> },
 }
 
 /// Python's `RouterRateLimitError`, in its words: no deployment of `model` takes a call now.
@@ -133,7 +137,7 @@ impl Error {
             Self::Ocr(error) => ocr_status(error),
             Self::Route(error) => route_status(error),
             Self::Routing(error) => routing_status(error),
-            Self::OnDeployment { error, .. } => error.status(),
+            Self::OnDeployment { error, .. } | Self::StreamFailed { error, .. } => error.status(),
         }
     }
 
@@ -144,6 +148,7 @@ impl Error {
             Self::OnDeployment { deployment_id, .. } => {
                 Some(Extension(Routing::failed_on(deployment_id)))
             }
+            Self::StreamFailed { routing, .. } => Some(Extension(routing.clone())),
             _ => None,
         }
     }
@@ -177,7 +182,7 @@ impl Error {
     /// The Anthropic error envelope Python's `AnthropicExceptionMapping` builds: an upstream
     /// body already in that shape passes through, any other has its message extracted.
     pub fn body(&self, request_id: Option<&str>) -> Value {
-        if let Self::OnDeployment { error, .. } = self {
+        if let Self::OnDeployment { error, .. } | Self::StreamFailed { error, .. } = self {
             return error.body(request_id);
         }
         let raw = match self {
@@ -205,7 +210,7 @@ impl Error {
     fn message(&self) -> String {
         match self {
             Self::Auth(error) => error.to_string(),
-            Self::OnDeployment { error, .. } => error.message(),
+            Self::OnDeployment { error, .. } | Self::StreamFailed { error, .. } => error.message(),
             Self::InvalidBody(_)
             | Self::InvalidPath(_)
             | Self::UnknownModel { .. }
@@ -258,6 +263,24 @@ fn ocr_status(error: &OcrError) -> StatusCode {
         .http_status_code()
         .and_then(|status| StatusCode::from_u16(status).ok())
         .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// The status Anthropic answers a request with when it fails with an error of `error_type`,
+/// which an error event of that type in a stream stands for: the inverse of [`error_type`],
+/// with `timeout_error` as `ANTHROPIC_ERROR_STATUS_CODE_MAP` in
+/// `litellm/llms/anthropic/common_utils.py` has it, and 500 for any other type.
+pub(crate) fn anthropic_error_status(error_type: &str) -> u16 {
+    match error_type {
+        "invalid_request_error" => 400,
+        "authentication_error" => 401,
+        "permission_error" => 403,
+        "not_found_error" => 404,
+        "request_too_large" => 413,
+        "rate_limit_error" => 429,
+        "timeout_error" => 504,
+        "overloaded_error" => 529,
+        _ => 500,
+    }
 }
 
 fn error_type(status: StatusCode) -> &'static str {
@@ -446,6 +469,15 @@ mod tests {
             error.body(None),
             json!({"type": "error", "error": {"type": "rate_limit_error", "message": message}})
         );
+    }
+
+    #[rstest]
+    fn an_error_events_status_is_the_one_its_type_is_answered_with(
+        #[values(400, 401, 403, 404, 413, 429, 529)] status: u16,
+    ) {
+        let answered_as = error_type(StatusCode::from_u16(status).unwrap());
+
+        assert_eq!(anthropic_error_status(answered_as), status);
     }
 
     #[rstest]

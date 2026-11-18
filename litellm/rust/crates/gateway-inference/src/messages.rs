@@ -26,7 +26,8 @@ use crate::{
     headers::Routing,
     model_restamp::{ReportedModel, Stamp},
     request,
-    routing::{self, Host, RouteAttempt},
+    routing::{self, Host, RouteAttempt, RouteChunks},
+    stream_hold::{self, Peek},
     stream_outcome,
 };
 
@@ -206,6 +207,13 @@ impl<H: Host> RouteAttempt for MessagesAttempt<'_, H> {
                 }
             }
         })
+    }
+
+    fn held(outcome: &mut Self::Outcome) -> Option<(&mut RouteChunks, Peek)> {
+        match &mut outcome.0 {
+            CallOutput::Stream { chunks, .. } => Some((chunks, stream_hold::messages_event)),
+            CallOutput::Complete(_) => None,
+        }
     }
 }
 
